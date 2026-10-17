@@ -85,6 +85,11 @@ LOGIN_MAX, LOGIN_WIN, LOGIN_BLOCK = 10, 600, 600   # 10 lan / 10 phut -> block 1
 ALL_MAX, ALL_WIN, ALL_BLOCK = 120, 60, 120          # 120 request / phut -> block 2 phut
 
 
+def is_ingress(handler):
+    # HA ingress luon gui header nay; cong 8900 truc tiep thi khong
+    return bool(handler.headers.get("X-Ingress-Path"))
+
+
 def client_ip(handler):
     # sau Cloudflare:  CF-Connecting-IP là IP thật
     for h in ("CF-Connecting-IP", "X-Forwarded-For"):
@@ -145,10 +150,47 @@ class Handler(BaseHTTPRequestHandler):
             return self._too_many(retry)
         u = urllib.parse.urlparse(self.path)
         if u.path in ("/", "/index.html"):
+            if is_ingress(self) or u.path == "/admin":
+                if is_ingress(self):
+                    return self._send(200, ADMIN_PAGE)   # sidebar HA = trang quan tri
             if session_ok(self._sid()):
-                # trang đọc MAC
-                return self._send(200, MAC_PAGE)
+                return self._send(200, MAC_PAGE)          # khach: trang doc MAC
             return self._send(200, LOGIN_PAGE)
+        if u.path == "/admin":
+            return self._send(403, "trang quan tri chi mo qua thanh ben HA (ingress)")
+        if u.path == "/api/list":
+            if not is_ingress(self):
+                return self._send(403, "forbidden", "text/plain")
+            q = (urllib.parse.parse_qs(u.query).get("q") or [""])[0].lower()
+            rows = []
+            try:
+                with open(REC_FILE, encoding="utf-8") as f:
+                    rows = [json.loads(l) for l in f if l.strip()]
+            except FileNotFoundError:
+                pass
+            if q:
+                rows = [r for r in rows if q in str(r.get("mac","")).lower() or q in str(r.get("label","")).lower()]
+            rows = rows[::-1]
+            return self._send(200, json.dumps(rows, ensure_ascii=False), "application/json; charset=utf-8")
+
+        if u.path == "/api/csv":
+            if not is_ingress(self):
+                return self._send(403, "forbidden", "text/plain")
+            rows = []
+            try:
+                with open(REC_FILE, encoding="utf-8") as f:
+                    rows = [json.loads(l) for l in f if l.strip()]
+            except FileNotFoundError:
+                pass
+            lines = ["mac,label,time"]
+            for r in rows:
+                lines.append('"%s","%s","%s"' % (
+                    str(r.get("mac","")).replace('"','\\"'),
+                    str(r.get("label","")).replace('"','\\"'),
+                    str(r.get("time",""))))
+            return self._send(200, "\n".join(lines) + "\n", "text/csv; charset=utf-8",
+                              {"Content-Disposition": 'attachment; filename="macs.csv"'})
+
         if u.path == "/export.csv":
             if not session_ok(self._sid()):
                 return self._send(401, "unauthorized", "text/plain")
@@ -221,7 +263,7 @@ a.btn{display:inline-block;background:#2563eb;color:#fff;padding:8px 14px;border
                 "Set-Cookie": f"{COOKIE}={tok}; Path=/; HttpOnly; SameSite=Lax",
             })
 
-        if not session_ok(self._sid()):
+        if not (session_ok(self._sid()) or is_ingress(self)):
             return self._send(401, "unauthorized", "text/plain")
 
         if u.path == "/submit":
@@ -240,10 +282,108 @@ a.btn{display:inline-block;background:#2563eb;color:#fff;padding:8px 14px;border
             tg_send(f"MAC khách: {mac}\nĐơn/tên: {label or '(trống)'}\n{rec['time']}")
             return self._send(200, json.dumps({"ok": True}), "application/json")
 
+        if u.path == "/api/add":
+            if not is_ingress(self):
+                return self._send(403, "forbidden", "text/plain")
+            try:
+                d = json.loads(raw)
+            except Exception:
+                return self._send(400, "bad json", "text/plain")
+            mac = str(d.get("mac") or "").strip().upper()
+            label = str(d.get("label") or "").strip()[:120]
+            if not mac:
+                return self._send(400, "missing mac", "text/plain")
+            rec = {"mac": mac, "label": label, "time": time.strftime("%Y-%m-%d %H:%M:%S"), "ua": "admin"}
+            with open(REC_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            return self._send(200, json.dumps({"ok": True}), "application/json")
+
+        if u.path == "/api/del":
+            if not is_ingress(self):
+                return self._send(403, "forbidden", "text/plain")
+            try:
+                d = json.loads(raw)
+            except Exception:
+                return self._send(400, "bad json", "text/plain")
+            mac = str(d.get("mac") or "").strip().upper()
+            keep, removed = [], 0
+            try:
+                with open(REC_FILE, encoding="utf-8") as f:
+                    for l in f:
+                        if not l.strip():
+                            continue
+                        r = json.loads(l)
+                        if str(r.get("mac","")).upper() == mac:
+                            removed += 1
+                        else:
+                            keep.append(l)
+            except FileNotFoundError:
+                pass
+            with open(REC_FILE, "w", encoding="utf-8") as f:
+                f.writelines(keep)
+            return self._send(200, json.dumps({"ok": True, "removed": removed}), "application/json")
+
         self._send(404, "not found", "text/plain")
 
     def log_message(self, *a):
         pass
+
+
+ADMIN_PAGE = """<!doctype html><html lang="vi"><meta charset="utf-8">
+<title>Quản trị MAC khách</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:1000px;margin:20px auto;padding:0 16px;background:#111;color:#eee}
+h2{margin:0 0 12px}
+input,button{font-size:15px;padding:9px 12px;border-radius:8px;border:1px solid #444;background:#1b1b1b;color:#eee}
+button{background:#2563eb;color:#fff;border:0;cursor:pointer}
+button.ghost{background:#333}
+table{width:100%;border-collapse:collapse;margin-top:14px}
+th,td{padding:8px;border-bottom:1px solid #333;text-align:left}
+th{color:#93c5fd}
+code{color:#4ade80}
+td button{padding:4px 10px;font-size:13px;background:#b91c1c}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.muted{color:#888;font-size:13px}
+</style>
+<h2>Quản trị MAC khách</h2>
+<div class="bar" style="margin-bottom:10px">
+  <input id="q" placeholder="Tìm theo MAC / tên / đơn" style="min-width:260px">
+  <button onclick="load()">Tìm</button>
+  <button class="ghost" onclick="q.value='';load()">Xoá lọc</button>
+  <a href="/api/csv"><button class="ghost">⬇ Tải CSV</button></a>
+  <span class="muted" id="n"></span>
+</div>
+<div class="bar" style="margin-bottom:6px">
+  <input id="m" placeholder="MAC khách (AA:BB:CC:DD:EE:FF)">
+  <input id="l" placeholder="Tên / mã đơn" style="min-width:220px">
+  <button onclick="add()">Thêm</button>
+</div>
+<table><thead><tr><th>MAC</th><th>Tên / đơn</th><th>Thời gian</th><th></th></tr></thead>
+<tbody id="tb"></tbody></table>
+<script>
+const $=id=>document.getElementById(id);
+async function load(){
+  const r=await fetch('api/list?q='+encodeURIComponent($('q').value));
+  const d=await r.json();
+  $('n').textContent=d.length+' bản ghi';
+  $('tb').innerHTML=d.map(x=>`<tr><td><code>${x.mac}</code></td><td>${(x.label||'').replace(/</g,'&lt;')}</td><td>${x.time||''}</td>
+    <td><button onclick="del('${x.mac}')">Xoá</button></td></tr>`).join('')||'<tr><td colspan="4">(chưa có)</td></tr>';
+}
+async function add(){
+  const mac=$('m').value.trim(), label=$('l').value.trim();
+  if(!mac){alert('Nhập MAC');return;}
+  const r=await fetch('api/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mac,label})});
+  if(r.ok){$('m').value='';$('l').value='';load();}else alert('Lỗi '+r.status);
+}
+async function del(mac){
+  if(!confirm('Xoá '+mac+' ?'))return;
+  const r=await fetch('api/del',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mac})});
+  if(r.ok)load();else alert('Lỗi '+r.status);
+}
+$('q').addEventListener('keydown',e=>{if(e.key==='Enter')load();});
+$('m').addEventListener('keydown',e=>{if(e.key==='Enter')add();});
+load();
+</script></html>"""
 
 
 LOGIN_PAGE = """<!doctype html><html lang="vi"><meta charset="utf-8">
