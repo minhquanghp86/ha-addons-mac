@@ -194,8 +194,6 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/export.csv":
             if not is_ingress(self):
                 return self._send(403, "forbidden", "text/plain")
-            if not session_ok(self._sid()):
-                return self._send(401, "unauthorized", "text/plain")
             rows = []
             try:
                 with open(REC_FILE, encoding="utf-8") as f:
@@ -214,8 +212,6 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/list":
             if not is_ingress(self):
                 return self._send(403, "forbidden", "text/plain")
-            if not session_ok(self._sid()):
-                return self._send(401, "unauthorized", "text/plain")
             rows = []
             try:
                 with open(REC_FILE, encoding="utf-8") as f:
