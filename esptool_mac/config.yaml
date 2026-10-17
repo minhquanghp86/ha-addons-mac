@@ -1,5 +1,5 @@
 name: "ESP MAC Reader"
-version: "1.1.1"
+version: "1.1.2"
 slug: "esptool_mac"
 description: "Khách đăng nhập, cắm ESP32 vào máy họ, trình duyệt đọc MAC eFuse (esptool-js) và gửi về add-on."
 arch:

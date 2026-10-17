@@ -1,0 +1,9 @@
+build_from:
+  amd64: ghcr.io/home-assistant/amd64-base:3.20
+  aarch64: ghcr.io/home-assistant/aarch64-base:3.20
+  armv7: ghcr.io/home-assistant/armv7-base:3.20
+labels:
+  org.opencontainers.image.title: "ESP MAC Reader"
+  org.opencontainers.image.description: "Đọc MAC eFuse trong trình duyệt khách"
+  org.opencontainers.image.source: "https://github.com/minhquanghp86/ha-addons-mac"
+  org.opencontainers.image.licenses: "MIT"
