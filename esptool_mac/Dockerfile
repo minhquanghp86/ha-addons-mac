@@ -4,5 +4,8 @@ FROM ${BUILD_FROM}
 RUN apk add --no-cache python3
 
 COPY app.py /app.py
-EXPOSE 8900
-CMD ["python3", "-u", "/app.py"]
+COPY run.sh /run.sh
+RUN chmod a+x /run.sh
+
+ENTRYPOINT ["/init"]
+CMD ["/run.sh"]
