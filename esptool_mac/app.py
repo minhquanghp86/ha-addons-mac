@@ -1,9 +1,11 @@
+import collections
 import hashlib
 import hmac
 import html
 import json
 import os
 import secrets
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -74,6 +76,44 @@ def page(name):
     return html_doc.replace("{{TITLE}}", html.escape(name))
 
 
+# ---------------- rate limit (lop bao ve phu, ngoai Cloudflare) ----------------
+_rl_lock = threading.Lock()
+_rl_hits = {}    # (ip, bucket) -> deque[timestamps]
+_rl_block = {}   # (ip, bucket) -> until_ts
+
+LOGIN_MAX, LOGIN_WIN, LOGIN_BLOCK = 10, 600, 600   # 10 lan / 10 phut -> block 10 phut
+ALL_MAX, ALL_WIN, ALL_BLOCK = 120, 60, 120          # 120 request / phut -> block 2 phut
+
+
+def client_ip(handler):
+    # sau Cloudflare:  CF-Connecting-IP là IP thật
+    for h in ("CF-Connecting-IP", "X-Forwarded-For"):
+        v = handler.headers.get(h, "")
+        if v:
+            return v.split(",")[0].strip()
+    return handler.client_address[0]
+
+
+def rl_check(ip, bucket, limit, window, block_s):
+    now = time.time()
+    key = (ip, bucket)
+    with _rl_lock:
+        until = _rl_block.get(key, 0)
+        if until > now:
+            return False, int(until - now)
+        dq = _rl_hits.get(key)
+        if dq is None:
+            dq = collections.deque()
+            _rl_hits[key] = dq
+        while dq and dq[0] < now - window:
+            dq.popleft()
+        if len(dq) >= limit:
+            _rl_block[key] = now + block_s
+            return False, block_s
+        dq.append(now)
+    return True, 0
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="text/html; charset=utf-8", extra=None):
         b = body.encode("utf-8") if isinstance(body, str) else body
@@ -93,7 +133,16 @@ class Handler(BaseHTTPRequestHandler):
                 return v
         return ""
 
+
+    def _too_many(self, retry):
+        self._send(429, "qua nhieu request, thu lai sau %s giay" % retry, "text/plain",
+                   {"Retry-After": str(retry)})
+
     def do_GET(self):
+        ip = client_ip(self)
+        ok, retry = rl_check(ip, "all", ALL_MAX, ALL_WIN, ALL_BLOCK)
+        if not ok:
+            return self._too_many(retry)
         u = urllib.parse.urlparse(self.path)
         if u.path in ("/", "/index.html"):
             if session_ok(self._sid()):
@@ -120,11 +169,18 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, "not found", "text/plain")
 
     def do_POST(self):
+        ip = client_ip(self)
+        ok, retry = rl_check(ip, "all", ALL_MAX, ALL_WIN, ALL_BLOCK)
+        if not ok:
+            return self._too_many(retry)
         u = urllib.parse.urlparse(self.path)
         n = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(n).decode("utf-8", "replace")
 
         if u.path == "/login":
+            ok, retry = rl_check(ip, "login", LOGIN_MAX, LOGIN_WIN, LOGIN_BLOCK)
+            if not ok:
+                return self._too_many(retry)
             q = urllib.parse.parse_qs(raw)
             user = (q.get("username") or [""])[0]
             pw = (q.get("password") or [""])[0]
