@@ -1,5 +1,5 @@
 name: "ESP MAC Reader"
-version: "1.1.6"
+version: "1.1.7"
 slug: "esptool_mac"
 description: "Khách đăng nhập, cắm ESP32 vào máy họ, trình duyệt đọc MAC eFuse (esptool-js) và gửi về add-on."
 arch:
@@ -9,6 +9,10 @@ arch:
 startup: services
 boot: auto
 host_network: false
+ingress: true
+ingress_port: 8900
+panel_icon: mdi:lan-connect
+panel_title: ESP MAC Reader
 ports:
   8900/tcp: 8900
 ports_description:

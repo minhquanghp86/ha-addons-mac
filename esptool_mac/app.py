@@ -149,6 +149,24 @@ class Handler(BaseHTTPRequestHandler):
                 # trang đọc MAC
                 return self._send(200, MAC_PAGE)
             return self._send(200, LOGIN_PAGE)
+        if u.path == "/export.csv":
+            if not session_ok(self._sid()):
+                return self._send(401, "unauthorized", "text/plain")
+            rows = []
+            try:
+                with open(REC_FILE, encoding="utf-8") as f:
+                    rows = [json.loads(l) for l in f if l.strip()]
+            except FileNotFoundError:
+                pass
+            lines = ["mac,label,time"]
+            for r in rows:
+                lines.append('"%s","%s","%s"' % (
+                    str(r.get("mac","")).replace('"','\"'),
+                    str(r.get("label","")).replace('"','\"'),
+                    str(r.get("time",""))))
+            return self._send(200, "\n".join(lines) + "\n", "text/csv; charset=utf-8",
+                              {"Content-Disposition": 'attachment; filename="macs.csv"'})
+
         if u.path == "/list":
             if not session_ok(self._sid()):
                 return self._send(401, "unauthorized", "text/plain")
@@ -158,10 +176,20 @@ class Handler(BaseHTTPRequestHandler):
                     rows = [json.loads(l) for l in f if l.strip()]
             except FileNotFoundError:
                 pass
-            rows = rows[-200:]
-            body = "<h2>MAC đã ghi nhận</h2><pre>" + html.escape(
-                "\n".join(f'{r.get("mac")}  {r.get("label")}  {r.get("time")}' for r in rows)
-            ) + "</pre><p><a href='/'>← về trang đọc</a></p>"
+            rows = rows[-500:][::-1]
+            trs = "".join(
+                "<tr><td><code>%s</code></td><td>%s</td><td>%s</td></tr>" % (
+                    html.escape(str(r.get("mac",""))), html.escape(str(r.get("label",""))),
+                    html.escape(str(r.get("time","")))) for r in rows)
+            body = """<!doctype html><html lang="vi"><meta charset="utf-8"><title>MAC đã nhận</title>
+<style>body{font-family:system-ui,sans-serif;max-width:900px;margin:24px auto;padding:0 16px;background:#111;color:#eee}
+table{width:100%%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #333;text-align:left}
+th{color:#93c5fd}code{color:#4ade80}
+a.btn{display:inline-block;background:#2563eb;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none;margin-right:8px}
+</style>
+<h2>MAC khách đã gửi (%d)</h2>
+<p><a class="btn" href="/">← Trang đọc MAC</a><a class="btn" href="/export.csv">⬇ Tải CSV</a></p>
+<table><tr><th>MAC</th><th>Tên / đơn</th><th>Thời gian</th></tr>%s</table></html>""" % (len(rows), trs or '<tr><td colspan=3>(chưa có)</td></tr>')
             return self._send(200, body)
         if u.path == "/logout":
             SESSIONS.pop(self._sid(), None)
@@ -248,7 +276,7 @@ a{color:#93c5fd}
 <h2>Đọc MAC eFuse</h2>
 <p>Cắm ESP32 vào USB <b>máy của bạn</b>, bấm Đọc MAC. Không ghi gì vào chip.<br>
 Cần Chrome/Edge trên máy tính.</p>
-<p><button id="read">Kết nối &amp; Đọc MAC</button> <a href="/logout">Đăng xuất</a></p>
+<p><button id="read">Kết nối &amp; Đọc MAC</button> <a href="/list">Danh sách MAC</a> · <a href="/logout">Đăng xuất</a></p>
 <div class="mac" id="mac">—</div>
 <p><input id="label" placeholder="Tên khách / mã đơn hàng"></p>
 <p><button id="send" disabled>Gửi MAC về cho nhà cung cấp</button> <span id="msg"></span></p>
