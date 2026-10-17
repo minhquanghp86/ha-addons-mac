@@ -192,6 +192,8 @@ class Handler(BaseHTTPRequestHandler):
                               {"Content-Disposition": 'attachment; filename="macs.csv"'})
 
         if u.path == "/export.csv":
+            if not is_ingress(self):
+                return self._send(403, "forbidden", "text/plain")
             if not session_ok(self._sid()):
                 return self._send(401, "unauthorized", "text/plain")
             rows = []
@@ -210,6 +212,8 @@ class Handler(BaseHTTPRequestHandler):
                               {"Content-Disposition": 'attachment; filename="macs.csv"'})
 
         if u.path == "/list":
+            if not is_ingress(self):
+                return self._send(403, "forbidden", "text/plain")
             if not session_ok(self._sid()):
                 return self._send(401, "unauthorized", "text/plain")
             rows = []
@@ -416,7 +420,7 @@ a{color:#93c5fd}
 <h2>Đọc MAC eFuse</h2>
 <p>Cắm ESP32 vào USB <b>máy của bạn</b>, bấm Đọc MAC. Không ghi gì vào chip.<br>
 Cần Chrome/Edge trên máy tính.</p>
-<p><button id="read">Kết nối &amp; Đọc MAC</button> <a href="/list">Danh sách MAC</a> · <a href="/logout">Đăng xuất</a></p>
+<p><button id="read">Kết nối &amp; Đọc MAC</button> <a href="/logout">Đăng xuất</a></p>
 <div class="mac" id="mac">—</div>
 <p><input id="label" placeholder="Tên khách / mã đơn hàng"></p>
 <p><button id="send" disabled>Gửi MAC về cho nhà cung cấp</button> <span id="msg"></span></p>
