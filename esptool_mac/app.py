@@ -1,0 +1,241 @@
+import hashlib
+import hmac
+import html
+import json
+import os
+import secrets
+import time
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORT = int(os.environ.get("MAC_PORT", "8900"))
+DATA_DIR = "/data"
+REC_FILE = os.path.join(DATA_DIR, "macs.jsonl")
+COOKIE = "mac_sid"
+
+# ---- đọc options của add-on ----
+def load_options():
+    for p in ("/data/options.json", "/options.json"):
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+OPTS = load_options()
+USER = str(OPTS.get("username") or "admin")
+PASS = str(OPTS.get("password") or "")
+TG_TOKEN = str(OPTS.get("telegram_token") or "")
+TG_CHAT = str(OPTS.get("telegram_chat_id") or "")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+SECRET = secrets.token_bytes(32)
+
+# session đơn giản: token -> hết hạn
+SESSIONS = {}
+SID_TTL = 12 * 3600
+
+
+def new_session():
+    tok = secrets.token_urlsafe(24)
+    SESSIONS[tok] = int(time.time()) + SID_TTL
+    return tok
+
+
+def session_ok(tok):
+    exp = SESSIONS.get(tok or "")
+    if not exp:
+        return False
+    if exp < time.time():
+        SESSIONS.pop(tok, None)
+        return False
+    return True
+
+
+def tg_send(text):
+    if not (TG_TOKEN and TG_CHAT):
+        return
+    try:
+        body = urllib.parse.urlencode({"chat_id": TG_CHAT, "text": text}).encode()
+        urllib.request.urlopen(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            data=body, timeout=10,
+        )
+    except Exception as e:
+        print("telegram error:", e, flush=True)
+
+
+def page(name):
+    with open("/index.html", encoding="utf-8") as f:
+        html_doc = f.read()
+    return html_doc.replace("{{TITLE}}", html.escape(name))
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, code, body, ctype="text/html; charset=utf-8", extra=None):
+        b = body.encode("utf-8") if isinstance(body, str) else body
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(b)))
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(b)
+
+    def _sid(self):
+        raw = self.headers.get("Cookie", "")
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == COOKIE:
+                return v
+        return ""
+
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        if u.path in ("/", "/index.html"):
+            if session_ok(self._sid()):
+                # trang đọc MAC
+                return self._send(200, MAC_PAGE)
+            return self._send(200, LOGIN_PAGE)
+        if u.path == "/list":
+            if not session_ok(self._sid()):
+                return self._send(401, "unauthorized", "text/plain")
+            rows = []
+            try:
+                with open(REC_FILE, encoding="utf-8") as f:
+                    rows = [json.loads(l) for l in f if l.strip()]
+            except FileNotFoundError:
+                pass
+            rows = rows[-200:]
+            body = "<h2>MAC đã ghi nhận</h2><pre>" + html.escape(
+                "\n".join(f'{r.get("mac")}  {r.get("label")}  {r.get("time")}' for r in rows)
+            ) + "</pre><p><a href='/'>← về trang đọc</a></p>"
+            return self._send(200, body)
+        if u.path == "/logout":
+            SESSIONS.pop(self._sid(), None)
+            return self._send(302, "", extra={"Location": "/", "Set-Cookie": f"{COOKIE}=; Path=/; Max-Age=0"})
+        self._send(404, "not found", "text/plain")
+
+    def do_POST(self):
+        u = urllib.parse.urlparse(self.path)
+        n = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(n).decode("utf-8", "replace")
+
+        if u.path == "/login":
+            q = urllib.parse.parse_qs(raw)
+            user = (q.get("username") or [""])[0]
+            pw = (q.get("password") or [""])[0]
+            ok = hmac.compare_digest(user, USER) and bool(PASS) and hmac.compare_digest(pw, PASS)
+            if not ok:
+                return self._send(200, LOGIN_PAGE.replace("{{ERR}}", "Sai tên đăng nhập hoặc mật khẩu"))
+            tok = new_session()
+            return self._send(302, "", extra={
+                "Location": "/",
+                "Set-Cookie": f"{COOKIE}={tok}; Path=/; HttpOnly; SameSite=Lax",
+            })
+
+        if not session_ok(self._sid()):
+            return self._send(401, "unauthorized", "text/plain")
+
+        if u.path == "/submit":
+            try:
+                d = json.loads(raw)
+            except Exception:
+                return self._send(400, "bad json", "text/plain")
+            mac = str(d.get("mac") or "").strip().upper()
+            label = str(d.get("label") or "").strip()[:120]
+            if not mac:
+                return self._send(400, "missing mac", "text/plain")
+            rec = {"mac": mac, "label": label, "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                   "ua": self.headers.get("User-Agent", "")[:160]}
+            with open(REC_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            tg_send(f"MAC khách: {mac}\nĐơn/tên: {label or '(trống)'}\n{rec['time']}")
+            return self._send(200, json.dumps({"ok": True}), "application/json")
+
+        self._send(404, "not found", "text/plain")
+
+    def log_message(self, *a):
+        pass
+
+
+LOGIN_PAGE = """<!doctype html><html lang="vi"><meta charset="utf-8">
+<title>Đăng nhập</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:380px;margin:80px auto;padding:0 16px;background:#111;color:#eee}
+input{width:100%;padding:10px;margin:6px 0;border-radius:8px;border:1px solid #444;background:#1b1b1b;color:#eee;font-size:16px;box-sizing:border-box}
+button{width:100%;margin-top:12px;background:#2563eb;color:#fff;border:0;padding:12px;border-radius:8px;font-size:16px;cursor:pointer}
+.err{color:#f87171}
+</style>
+<h2>ESP MAC Reader</h2>
+<p class="err">{{ERR}}</p>
+<form method="post" action="login">
+ <input name="username" placeholder="Tên đăng nhập" autocomplete="username">
+ <input name="password" type="password" placeholder="Mật khẩu" autocomplete="current-password">
+ <button>Đăng nhập</button>
+</form></html>"""
+
+MAC_PAGE = """<!doctype html><html lang="vi"><meta charset="utf-8">
+<title>Đọc MAC ESP32</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:680px;margin:28px auto;padding:0 16px;background:#111;color:#eee}
+button{background:#2563eb;color:#fff;border:0;padding:10px 16px;border-radius:8px;font-size:15px;cursor:pointer}
+button:disabled{background:#444}
+input{width:100%;padding:10px;margin:8px 0;border-radius:8px;border:1px solid #444;background:#1b1b1b;color:#eee;font-size:16px;box-sizing:border-box}
+.mac{font-size:30px;font-weight:700;color:#4ade80;letter-spacing:1px;margin:14px 0}
+pre{background:#000;padding:12px;border-radius:8px;overflow:auto;font-size:12px;max-height:260px}
+a{color:#93c5fd}
+</style>
+<h2>Đọc MAC eFuse</h2>
+<p>Cắm ESP32 vào USB <b>máy của bạn</b>, bấm Đọc MAC. Không ghi gì vào chip.<br>
+Cần Chrome/Edge trên máy tính.</p>
+<p><button id="read">Kết nối &amp; Đọc MAC</button> <a href="/logout">Đăng xuất</a></p>
+<div class="mac" id="mac">—</div>
+<p><input id="label" placeholder="Tên khách / mã đơn hàng"></p>
+<p><button id="send" disabled>Gửi MAC về cho nhà cung cấp</button> <span id="msg"></span></p>
+<pre id="log"></pre>
+<script type="module">
+const $=id=>document.getElementById(id);
+let ESPLoader, Transport;
+try{
+  const m = await import('https://unpkg.com/esptool-js@0.5.4/bundle.js');
+  ESPLoader = m.ESPLoader; Transport = m.Transport;
+}catch(e){ $('log').textContent='Không tải được esptool-js: '+e; }
+
+async function readMac(){
+  $('read').disabled=true; $('mac').textContent='...'; $('log').textContent='';
+  try{
+    const port = await navigator.serial.requestPort();
+    const transport = new Transport(port, true);
+    const loader = new ESPLoader({ transport, baudrate: 115200, terminal: {
+      clean(){}, writeLine(t){ $('log').textContent += t+"\n"; }, write(t){ $('log').textContent += t; } } });
+    await loader.main();
+    const mac = (await loader.readMac(0)).toUpperCase();
+    $('mac').textContent = mac;
+    $('send').disabled = false;
+    $('log').textContent += "\nMAC = "+mac+"\n";
+  }catch(e){
+    $('mac').textContent='LỖI';
+    $('log').textContent += "\n"+e;
+  }
+  $('read').disabled=false;
+}
+$('read').onclick = readMac;
+$('send').onclick = async ()=>{
+  $('send').disabled=true; $('msg').textContent='';
+  try{
+    const r = await fetch('submit',{method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({mac:$('mac').textContent, label:$('label').value})});
+    $('msg').textContent = r.ok ? '✅ Đã gửi' : '❌ Lỗi '+r.status;
+  }catch(e){ $('msg').textContent='❌ '+e; }
+  $('send').disabled=false;
+};
+</script></html>"""
+
+
+if __name__ == "__main__":
+    print(f"listening on 0.0.0.0:{PORT}", flush=True)
+    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
